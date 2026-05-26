@@ -54,23 +54,13 @@ public class SecurityConfig {
     @Bean
     public CorsConfigurationSource corsSource() {
         CorsConfiguration config = new CorsConfiguration();
-
-        // ── Allow all origins the frontend can come from ──────────
-        // http://localhost      → Docker (port 80)
-        // http://localhost:80   → Docker explicit port
-        // http://localhost:5173 → Vite dev server (local dev without Docker)
-        config.setAllowedOrigins(List.of(
-            "http://localhost",
-            "http://localhost:80",
-            "http://localhost:5173"
-        ));
-
+        config.setAllowedOriginPatterns(List.of("*"));
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
         config.setAllowedHeaders(List.of("*"));
         config.setAllowCredentials(false);
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
-        source.registerCorsConfiguration("/api/**", config);
+        source.registerCorsConfiguration("/**", config);
         return source;
     }
 }
