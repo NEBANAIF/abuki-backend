@@ -30,21 +30,21 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         String uri = request.getRequestURI();
         String method = request.getMethod();
 
-        // ── Always pass through OPTIONS preflight requests ────
+        // Always pass through OPTIONS preflight requests
         if ("OPTIONS".equalsIgnoreCase(method)) {
             chain.doFilter(request, response);
             return;
         }
 
-        // ── Public endpoints — skip JWT check entirely ────────
-        if (uri.startsWith("/api/auth/")) {
+        // Public endpoints — skip JWT check entirely
+        if (uri.startsWith("/api/auth/") || uri.equals("/actuator/health")) {
             chain.doFilter(request, response);
             return;
         }
 
         String authHeader = request.getHeader("Authorization");
 
-        // ── No token on a protected route → 401 ──────────────
+        // No token on a protected route → 401
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
             response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
             response.setContentType("application/json;charset=UTF-8");
@@ -54,7 +54,7 @@ public class JwtAuthFilter extends OncePerRequestFilter {
 
         String token = authHeader.substring(7).trim();
 
-        // ── Invalid / expired token → 401 ────────────────────
+        // Invalid / expired token → 401
         if (token.isEmpty() || !jwtService.isValid(token)) {
             response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
             response.setContentType("application/json;charset=UTF-8");
@@ -62,7 +62,7 @@ public class JwtAuthFilter extends OncePerRequestFilter {
             return;
         }
 
-        // ── Valid token — set authentication in context ───────
+        // Valid token — set authentication in context
         String email = jwtService.extractEmail(token);
         String role  = jwtService.extractRole(token);
 
