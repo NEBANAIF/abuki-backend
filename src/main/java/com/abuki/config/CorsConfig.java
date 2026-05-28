@@ -13,20 +13,13 @@ public class CorsConfig {
         return new WebMvcConfigurer() {
             @Override
             public void addCorsMappings(CorsRegistry registry) {
-
-                registry.addMapping("/**")
-                        .allowedOriginPatterns("*")
-
                 registry.addMapping("/api/**")
                         .allowedOrigins(
-                            // ── Local development ──────────────────────────────
                             "http://localhost",
                             "http://localhost:80",
                             "http://localhost:5173",
-                            // ── Production Netlify frontend ────────────────────
                             "https://abukis.netlify.app"
                         )
-
                         .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
                         .allowedHeaders("*")
                         .allowCredentials(false);
