@@ -28,34 +28,50 @@ public class JwtAuthFilter extends OncePerRequestFilter {
             throws ServletException, IOException {
 
         String uri = request.getRequestURI();
-        boolean publicAuth = uri.startsWith("/api/auth/");
+        String method = request.getMethod();
+
+        // ── Always pass through OPTIONS preflight requests ────
+        if ("OPTIONS".equalsIgnoreCase(method)) {
+            chain.doFilter(request, response);
+            return;
+        }
+
+        // ── Public endpoints — skip JWT check entirely ────────
+        if (uri.startsWith("/api/auth/")) {
+            chain.doFilter(request, response);
+            return;
+        }
 
         String authHeader = request.getHeader("Authorization");
 
-        if (!publicAuth && authHeader != null && authHeader.startsWith("Bearer ")) {
-            String token = authHeader.substring(7).trim();
-            if (!token.isEmpty() && !jwtService.isValid(token)) {
-                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-                response.setContentType("application/json;charset=UTF-8");
-                response.getWriter().write("{\"error\":\"Invalid or expired token\"}");
-                return;
-            }
+        // ── No token on a protected route → 401 ──────────────
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+            response.setContentType("application/json;charset=UTF-8");
+            response.getWriter().write("{\"error\":\"Authentication required\"}");
+            return;
         }
 
-        if (authHeader != null && authHeader.startsWith("Bearer ")) {
-            String token = authHeader.substring(7).trim();
-            if (jwtService.isValid(token)) {
-                String email = jwtService.extractEmail(token);
-                String role  = jwtService.extractRole(token);
+        String token = authHeader.substring(7).trim();
 
-                UsernamePasswordAuthenticationToken auth =
-                    new UsernamePasswordAuthenticationToken(
-                        email, null,
-                        List.of(new SimpleGrantedAuthority("ROLE_" + role))
-                    );
-                SecurityContextHolder.getContext().setAuthentication(auth);
-            }
+        // ── Invalid / expired token → 401 ────────────────────
+        if (token.isEmpty() || !jwtService.isValid(token)) {
+            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+            response.setContentType("application/json;charset=UTF-8");
+            response.getWriter().write("{\"error\":\"Invalid or expired token\"}");
+            return;
         }
+
+        // ── Valid token — set authentication in context ───────
+        String email = jwtService.extractEmail(token);
+        String role  = jwtService.extractRole(token);
+
+        UsernamePasswordAuthenticationToken auth =
+            new UsernamePasswordAuthenticationToken(
+                email, null,
+                List.of(new SimpleGrantedAuthority("ROLE_" + role))
+            );
+        SecurityContextHolder.getContext().setAuthentication(auth);
 
         chain.doFilter(request, response);
     }
