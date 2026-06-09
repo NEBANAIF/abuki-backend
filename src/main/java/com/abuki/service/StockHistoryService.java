@@ -9,29 +9,23 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.List;
 
 @Service
+@Transactional
 public class StockHistoryService {
 
-    @Autowired private StockHistoryRepository historyRepo;
+    @Autowired
+    private StockHistoryRepository stockHistoryRepository;
 
-    // ── READ ALL ─────────────────────────────────────────
-    @Transactional(readOnly = true)
     public List<StockHistory> getAll() {
-        return historyRepo.findAllOrderedByDate();
+        return stockHistoryRepository.findAllOrderedByDate();
     }
 
-    // ── READ BY PRODUCT ───────────────────────────────────
-    @Transactional(readOnly = true)
     public List<StockHistory> getByProduct(Long productId) {
-        return historyRepo.findByProductId(productId);
+        return stockHistoryRepository.findByProductId(productId);
     }
 
-    // ── DELETE ───────────────────────────────────────────
-    @Transactional
     public void delete(Long id) {
-        if (!historyRepo.existsById(id)) {
-            throw new RuntimeException("Stock history record not found: " + id);
-        }
-        historyRepo.deleteById(id);
-        historyRepo.flush();
+        StockHistory history = stockHistoryRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Stock history not found: " + id));
+        stockHistoryRepository.delete(history);
     }
 }

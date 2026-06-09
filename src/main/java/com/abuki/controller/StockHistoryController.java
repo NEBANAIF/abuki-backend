@@ -12,7 +12,8 @@ import java.util.List;
 @RequestMapping("/api/stock-history")
 public class StockHistoryController {
 
-    @Autowired private StockHistoryService stockHistoryService;
+    @Autowired
+    private StockHistoryService stockHistoryService;
 
     // GET /api/stock-history
     @GetMapping

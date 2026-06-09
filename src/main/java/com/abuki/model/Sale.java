@@ -20,9 +20,11 @@ public class Sale {
     @Column(nullable = false)
     private Integer quantity;
 
+    // Selling price per unit at time of sale
     @Column(nullable = false)
     private Double price;
 
+    // Total revenue = price * quantity
     @Column(nullable = false)
     private Double total;
 
@@ -80,5 +82,5 @@ public class Sale {
     public void setSaleTime(LocalTime saleTime) { this.saleTime = saleTime; }
 
     public LocalDateTime getCreatedAt() { return createdAt; }
-    public void setCreatedAt(LocalDateTime v) { this.createdAt = v; }
+    public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
 }

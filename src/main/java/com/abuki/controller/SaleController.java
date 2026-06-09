@@ -12,7 +12,8 @@ import java.util.List;
 @RequestMapping("/api/sales")
 public class SaleController {
 
-    @Autowired private SaleService saleService;
+    @Autowired
+    private SaleService saleService;
 
     // GET /api/sales
     @GetMapping
@@ -22,12 +23,8 @@ public class SaleController {
 
     // GET /api/sales/{id}
     @GetMapping("/{id}")
-    public ResponseEntity<?> getById(@PathVariable Long id) {
-        try {
-            return ResponseEntity.ok(saleService.getById(id));
-        } catch (RuntimeException e) {
-            return ResponseEntity.notFound().build();
-        }
+    public ResponseEntity<Sale> getById(@PathVariable Long id) {
+        return ResponseEntity.ok(saleService.getById(id));
     }
 
     // POST /api/sales

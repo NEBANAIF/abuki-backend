@@ -3,169 +3,209 @@ package com.abuki.service;
 import com.abuki.model.Product;
 import com.abuki.model.StockHistory;
 import com.abuki.repository.ProductRepository;
-import com.abuki.repository.SaleRepository;
 import com.abuki.repository.StockHistoryRepository;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.cache.annotation.Caching;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
+/**
+ * Product service — all read operations are cached under the "products" cache.
+ * Any write operation (create / update / delete / adjustStock) evicts the cache
+ * so the next read always fetches fresh data from Neon PostgreSQL.
+ *
+ * Cache strategy:
+ *  @Cacheable("products")          → cache the result, return cached on next call
+ *  @CacheEvict(allEntries=true)    → wipe entire "products" cache on any mutation
+ *
+ * Load balancing note:
+ *  Each backend replica has its own in-process Caffeine cache. A write on replica A
+ *  evicts replica A's cache. Replica B's cache expires naturally within the TTL
+ *  configured in CacheConfig (10 minutes). This is the correct trade-off for an ERP
+ *  with infrequent writes and high read traffic.
+ */
 @Service
+@Transactional
 public class ProductService {
 
-    @Autowired private ProductRepository     productRepo;
-    @Autowired private SaleRepository        saleRepo;
-    @Autowired private StockHistoryRepository historyRepo;
+    @Autowired
+    private ProductRepository productRepository;
 
-    // ── READ ALL ─────────────────────────────────────────
+    @Autowired
+    private StockHistoryRepository stockHistoryRepository;
+
+    // ── Read: cached ─────────────────────────────────────
+
+    /**
+     * Returns all products. Result is cached under key "allProducts".
+     * Cache is evicted whenever any product is created, updated, or deleted.
+     */
+    @Cacheable(value = "products", key = "'allProducts'")
     @Transactional(readOnly = true)
     public List<Product> getAll() {
-        return productRepo.findAll();
+        return productRepository.findAll();
     }
 
-    // ── READ ONE ─────────────────────────────────────────
+    /**
+     * Returns a single product by ID. Cached per product ID.
+     * Cache is evicted on any mutation that touches this product.
+     */
+    @Cacheable(value = "products", key = "#id")
     @Transactional(readOnly = true)
     public Product getById(Long id) {
-        return productRepo.findById(id)
-            .orElseThrow(() -> new RuntimeException("Product not found: " + id));
+        return productRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Product not found with id: " + id));
     }
 
-    // ── SEARCH ───────────────────────────────────────────
+    /**
+     * Full-text search across name, SKU, and category.
+     * Cached per keyword so repeated identical searches are instant.
+     */
+    @Cacheable(value = "products", key = "'search:' + #keyword")
     @Transactional(readOnly = true)
     public List<Product> search(String keyword) {
-        return productRepo.search(keyword);
+        return productRepository.search(keyword);
     }
 
-    // ── LOW / OUT STOCK ───────────────────────────────────
+    /**
+     * Returns products in LOW_STOCK status.
+     * Cached separately — evicted on any product mutation.
+     */
+    @Cacheable(value = "products", key = "'lowStock'")
     @Transactional(readOnly = true)
-    public List<Product> getLowStock() { return productRepo.findLowStock(); }
+    public List<Product> getLowStock() {
+        return productRepository.findLowStock();
+    }
 
+    /**
+     * Returns products with zero stock.
+     * Cached separately — evicted on any product mutation.
+     */
+    @Cacheable(value = "products", key = "'outOfStock'")
     @Transactional(readOnly = true)
-    public List<Product> getOutOfStock() { return productRepo.findOutOfStock(); }
+    public List<Product> getOutOfStock() {
+        return productRepository.findOutOfStock();
+    }
 
-    // ── CREATE ───────────────────────────────────────────
-    @Transactional
-    public Product create(Product req) {
-        // SKU must be unique
-        if (productRepo.findBySku(req.getSku()).isPresent()) {
-            throw new RuntimeException("SKU already exists: " + req.getSku());
+    // ── Write: cache-evicting ─────────────────────────────
+
+    /**
+     * Creates a new product.
+     * Evicts the entire "products" cache so all lists are refreshed.
+     */
+    @CacheEvict(value = "products", allEntries = true)
+    public Product create(Product product) {
+        // Validate SKU uniqueness
+        if (productRepository.findBySku(product.getSku()).isPresent()) {
+            throw new RuntimeException("SKU already exists: " + product.getSku());
         }
+        if (product.getCost()     == null) product.setCost(0.0);
+        if (product.getStock()    == null) product.setStock(0);
+        if (product.getMinStock() == null) product.setMinStock(30);
 
-        // Safe defaults
-        if (req.getCost()     == null) req.setCost(0.0);
-        if (req.getStock()    == null) req.setStock(0);
-        if (req.getMinStock() == null) req.setMinStock(30);
-        if (req.getPrice()    == null) req.setPrice(0.0);
+        Product saved = productRepository.save(product);
 
-        // Compute status before saving
-        req.computeStatus();
-
-        // Save and immediately flush to DB
-        Product saved = productRepo.saveAndFlush(req);
-
-        // Log initial stock if > 0
+        // Record initial stock in history if stock > 0
         if (saved.getStock() > 0) {
-            saveHistory(saved, saved.getStock(), 0, saved.getStock(),
-                "STOCK_ADDITION", "Initial stock", "System", "INIT-" + saved.getId());
+            recordHistory(saved, saved.getStock(), 0, saved.getStock(),
+                    "STOCK_ADDITION", "Initial stock", "System", "INIT-" + saved.getId());
         }
-
         return saved;
     }
 
-    // ── UPDATE ───────────────────────────────────────────
-    @Transactional
-    public Product update(Long id, Product req) {
-        Product p = getById(id);
+    /**
+     * Updates an existing product's details (not stock — use adjustStock for that).
+     * Evicts the entire "products" cache.
+     */
+    @CacheEvict(value = "products", allEntries = true)
+    public Product update(Long id, Product updated) {
+        Product existing = productRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Product not found with id: " + id));
 
-        // Check SKU uniqueness only if changed
-        if (!p.getSku().equals(req.getSku())) {
-            if (productRepo.findBySku(req.getSku()).isPresent()) {
-                throw new RuntimeException("SKU already exists: " + req.getSku());
+        // If SKU changed, check uniqueness
+        if (!existing.getSku().equals(updated.getSku())) {
+            if (productRepository.findBySku(updated.getSku()).isPresent()) {
+                throw new RuntimeException("SKU already exists: " + updated.getSku());
             }
         }
 
-        // Apply all field updates
-        p.setName(req.getName());
-        p.setSku(req.getSku());
-        p.setPrice(req.getPrice() != null ? req.getPrice() : 0.0);
-        p.setCost(req.getCost() != null ? req.getCost() : 0.0);
-        p.setMinStock(req.getMinStock() != null ? req.getMinStock() : 30);
-        p.setCategory(req.getCategory());
-        p.setDescription(req.getDescription());
-
-        // Only update stock if explicitly provided
-        if (req.getStock() != null) {
-            p.setStock(req.getStock());
-        }
-
-        // Recompute status
-        p.computeStatus();
-
-        // Save and flush to DB immediately
-        return productRepo.saveAndFlush(p);
+        existing.setName(updated.getName());
+        existing.setSku(updated.getSku());
+        existing.setPrice(updated.getPrice());
+        existing.setCost(updated.getCost() != null ? updated.getCost() : 0.0);
+        existing.setMinStock(updated.getMinStock() != null ? updated.getMinStock() : 30);
+        existing.setCategory(updated.getCategory());
+        existing.setDescription(updated.getDescription());
+        // Stock is managed separately via adjustStock — never changed here
+        return productRepository.save(existing);
     }
 
-    // ── ADJUST STOCK (add or subtract) ───────────────────
-    @Transactional
-    public Product adjustStock(Long id, int change, String reason, String user) {
-        Product p = productRepo.findByIdForUpdate(id)
-            .orElseThrow(() -> new RuntimeException("Product not found: " + id));
+    /**
+     * Adjusts (adds or subtracts) stock for a product.
+     * Evicts the entire "products" cache.
+     *
+     * @param id             product ID
+     * @param quantityChange positive = add stock, negative = remove stock
+     * @param reason         human-readable reason for the change
+     * @param user           who made the change
+     */
+    @CacheEvict(value = "products", allEntries = true)
+    public Product adjustStock(Long id, int quantityChange, String reason, String user) {
+        Product product = productRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Product not found with id: " + id));
 
-        int before = p.getStock();
-        int after  = before + change;
+        int prevStock = product.getStock();
+        int newStock  = prevStock + quantityChange;
 
-        if (after < 0) {
+        if (newStock < 0) {
             throw new RuntimeException(
-                "Insufficient stock. Available: " + before + ", requested: " + Math.abs(change));
+                "Insufficient stock. Available: " + prevStock +
+                ", requested: " + Math.abs(quantityChange));
         }
 
-        p.setStock(after);
-        p.computeStatus();
-        Product saved = productRepo.saveAndFlush(p);
+        product.setStock(newStock);
+        Product saved = productRepository.save(product);
 
-        String type = change > 0 ? "STOCK_ADDITION" : "ADJUSTMENT";
-        saveHistory(saved, change, before, after, type, reason, user, null);
-
+        String type = quantityChange > 0 ? "STOCK_ADDITION" : "ADJUSTMENT";
+        recordHistory(saved, quantityChange, prevStock, newStock, type, reason, user, null);
         return saved;
     }
 
-    // ── DELETE ───────────────────────────────────────────
-    // Order matters: delete FK children before parent
-    @Transactional
+    /**
+     * Deletes a product by ID.
+     * Evicts the entire "products" cache.
+     */
+    @CacheEvict(value = "products", allEntries = true)
     public void delete(Long id) {
-        if (!productRepo.existsById(id)) {
-            throw new RuntimeException("Product not found: " + id);
-        }
-
-        // 1. Delete stock_history rows for this product
-        historyRepo.deleteByProductId(id);
-        historyRepo.flush();
-
-        // 2. Delete sales rows for this product
-        saleRepo.deleteByProductId(id);
-        saleRepo.flush();
-
-        // 3. Delete the product
-        productRepo.deleteById(id);
-        productRepo.flush();
+        Product product = productRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Product not found with id: " + id));
+        productRepository.delete(product);
     }
 
-    // ── INTERNAL: save stock history ─────────────────────
-    @Transactional
-    public void saveHistory(Product product, int change,
-                             int before, int after,
-                             String type, String reason,
-                             String user, String reference) {
-        StockHistory h = new StockHistory();
-        h.setProduct(product);
-        h.setQuantityChange(change);
-        h.setPreviousStock(before);
-        h.setNewStock(after);
-        h.setType(type);
-        h.setReason(reason);
-        h.setUser(user != null ? user : "Admin");
-        h.setReference(reference);
-        historyRepo.saveAndFlush(h);
+    // ── Internal: record stock history ───────────────────
+
+    /**
+     * Saves a StockHistory row for any stock-changing operation.
+     * Called internally by create, adjustStock, and SaleService.
+     * Does NOT evict the products cache — caller handles that.
+     */
+    public void recordHistory(Product product, int quantityChange,
+                               int prevStock, int newStock,
+                               String type, String reason,
+                               String user, String reference) {
+        StockHistory history = new StockHistory();
+        history.setProduct(product);
+        history.setQuantityChange(quantityChange);
+        history.setPreviousStock(prevStock);
+        history.setNewStock(newStock);
+        history.setType(type);
+        history.setReason(reason);
+        history.setUser(user);
+        history.setReference(reference);
+        stockHistoryRepository.save(history);
     }
 }

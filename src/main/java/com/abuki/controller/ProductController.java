@@ -12,7 +12,8 @@ import java.util.List;
 @RequestMapping("/api/products")
 public class ProductController {
 
-    @Autowired private ProductService productService;
+    @Autowired
+    private ProductService productService;
 
     // GET /api/products
     @GetMapping
@@ -22,12 +23,8 @@ public class ProductController {
 
     // GET /api/products/{id}
     @GetMapping("/{id}")
-    public ResponseEntity<?> getById(@PathVariable Long id) {
-        try {
-            return ResponseEntity.ok(productService.getById(id));
-        } catch (RuntimeException e) {
-            return ResponseEntity.notFound().build();
-        }
+    public ResponseEntity<Product> getById(@PathVariable Long id) {
+        return ResponseEntity.ok(productService.getById(id));
     }
 
     // GET /api/products/search?keyword=camera
@@ -82,7 +79,7 @@ public class ProductController {
         }
     }
 
-    // Backward compat alias
+    // Backward compatible: POST /api/products/{id}/add-stock
     @PostMapping("/{id}/add-stock")
     public ResponseEntity<?> addStock(
             @PathVariable Long id,

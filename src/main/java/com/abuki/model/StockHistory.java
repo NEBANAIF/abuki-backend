@@ -17,6 +17,7 @@ public class StockHistory {
     @JoinColumn(name = "product_id", nullable = false)
     private Product product;
 
+    // Positive = added, Negative = removed
     @Column(name = "quantity_change", nullable = false)
     private Integer quantityChange;
 
@@ -26,19 +27,20 @@ public class StockHistory {
     @Column(name = "new_stock", nullable = false)
     private Integer newStock;
 
+    // SALE | STOCK_ADDITION | ADJUSTMENT | RETURN | DISCARD
     @Column(nullable = false, length = 30)
     private String type;
 
     @Column(length = 500)
     private String reason;
 
-    @Column(name = "recorded_by", nullable = false, length = 100)
+    @Column(nullable = false, length = 100)
     private String user;
 
-    @Column(name = "date")
+    @Column(name = "sale_date")
     private LocalDate date;
 
-    @Column(name = "time")
+    @Column(name = "sale_time")
     private LocalTime time;
 
     @Column(name = "reference")
@@ -89,5 +91,5 @@ public class StockHistory {
     public void setReference(String reference) { this.reference = reference; }
 
     public LocalDateTime getCreatedAt() { return createdAt; }
-    public void setCreatedAt(LocalDateTime v) { this.createdAt = v; }
+    public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
 }

@@ -18,7 +18,7 @@ public class Product {
     private String sku;
 
     @Column(nullable = false)
-    private Double price = 0.0;
+    private Double price;
 
     @Column(nullable = false)
     private Double cost = 0.0;
@@ -26,7 +26,7 @@ public class Product {
     @Column(nullable = false)
     private Integer stock = 0;
 
-    @Column(name = "min_stock", nullable = false)
+    @Column(name = "min_stock")
     private Integer minStock = 30;
 
     private String category;
@@ -34,8 +34,8 @@ public class Product {
     @Column(length = 1000)
     private String description;
 
-    @Column(nullable = false)
-    private String status = "OUT_OF_STOCK";
+    // Managed automatically — IN_STOCK / LOW_STOCK / OUT_OF_STOCK
+    private String status;
 
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;
@@ -43,23 +43,24 @@ public class Product {
     @Column(name = "updated_at")
     private LocalDateTime updatedAt;
 
+    // ── Lifecycle hooks ──────────────────────────────────
     @PrePersist
     protected void onCreate() {
         createdAt = LocalDateTime.now();
         updatedAt = LocalDateTime.now();
-        computeStatus();
+        updateStatus();
     }
 
     @PreUpdate
     protected void onUpdate() {
         updatedAt = LocalDateTime.now();
-        computeStatus();
+        updateStatus();
     }
 
-    public void computeStatus() {
-        if (this.stock == null || this.stock <= 0) {
+    public void updateStatus() {
+        if (stock == null || stock == 0) {
             this.status = "OUT_OF_STOCK";
-        } else if (this.minStock != null && this.stock <= this.minStock) {
+        } else if (minStock != null && stock <= minStock) {
             this.status = "LOW_STOCK";
         } else {
             this.status = "IN_STOCK";
@@ -98,8 +99,8 @@ public class Product {
     public void setStatus(String status) { this.status = status; }
 
     public LocalDateTime getCreatedAt() { return createdAt; }
-    public void setCreatedAt(LocalDateTime v) { this.createdAt = v; }
+    public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
 
     public LocalDateTime getUpdatedAt() { return updatedAt; }
-    public void setUpdatedAt(LocalDateTime v) { this.updatedAt = v; }
+    public void setUpdatedAt(LocalDateTime updatedAt) { this.updatedAt = updatedAt; }
 }

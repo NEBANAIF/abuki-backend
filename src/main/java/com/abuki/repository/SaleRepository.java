@@ -2,7 +2,6 @@ package com.abuki.repository;
 
 import com.abuki.model.Sale;
 import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
@@ -10,117 +9,127 @@ import org.springframework.stereotype.Repository;
 import java.time.LocalDate;
 import java.util.List;
 
+/**
+ * Sale repository — all analytics queries use JPQL with EXTRACT()
+ * which is PostgreSQL / Neon compatible.
+ * Never uses MySQL-specific YEAR() / MONTH() functions.
+ */
 @Repository
 public interface SaleRepository extends JpaRepository<Sale, Long> {
 
-    // ── Existing queries ──────────────────────────────────────────────────────
+    // ── Basic finders ─────────────────────────────────────────────────────────
 
+    /** All sales on a specific date */
+    List<Sale> findBySaleDate(LocalDate date);
+
+    /** All sales in a date range — used by hourly series loader */
+    List<Sale> findBySaleDateBetween(LocalDate from, LocalDate to);
+
+    /** All sales for a specific product */
     List<Sale> findByProductId(Long productId);
 
+    /** All sales ordered newest first */
     @Query("SELECT s FROM Sale s ORDER BY s.saleDate DESC, s.saleTime DESC")
     List<Sale> findAllOrderedByDate();
 
-    @Modifying
-    @Query("DELETE FROM Sale s WHERE s.product.id = :productId")
-    int deleteByProductId(Long productId);
+    // ── Simple aggregates ─────────────────────────────────────────────────────
 
-    // ── Analytics: totals over a date range ──────────────────────────────────
+    /** Total revenue on a single date */
+    @Query("SELECT COALESCE(SUM(s.total), 0) FROM Sale s WHERE s.saleDate = :date")
+    Double sumRevenueByDate(@Param("date") LocalDate date);
+
+    /** Total revenue in a date range */
+    @Query("SELECT COALESCE(SUM(s.total), 0) FROM Sale s WHERE s.saleDate BETWEEN :from AND :to")
+    Double sumRevenueBetween(@Param("from") LocalDate from, @Param("to") LocalDate to);
+
+    /** Number of sale rows on a single date */
+    @Query("SELECT COUNT(s) FROM Sale s WHERE s.saleDate = :date")
+    Long countByDate(@Param("date") LocalDate date);
+
+    // ── Analytics: totals in date range ──────────────────────────────────────
 
     /**
-     * Total revenue (sum of sale.total) between two dates inclusive.
+     * Total revenue (SUM of s.total) between from and to inclusive.
+     * Returns 0 when no sales exist — never returns null thanks to COALESCE.
      */
-    @Query("SELECT SUM(s.total) FROM Sale s WHERE s.saleDate BETWEEN :from AND :to")
+    @Query("SELECT COALESCE(SUM(s.total), 0) FROM Sale s WHERE s.saleDate BETWEEN :from AND :to")
     Double sumTotalBetween(@Param("from") LocalDate from, @Param("to") LocalDate to);
 
     /**
-     * Total units sold between two dates inclusive.
+     * Total units sold (SUM of s.quantity) between from and to inclusive.
+     * Returns 0 when no sales exist.
      */
-    @Query("SELECT SUM(s.quantity) FROM Sale s WHERE s.saleDate BETWEEN :from AND :to")
+    @Query("SELECT COALESCE(SUM(s.quantity), 0) FROM Sale s WHERE s.saleDate BETWEEN :from AND :to")
     Long sumQuantityBetween(@Param("from") LocalDate from, @Param("to") LocalDate to);
 
     /**
-     * Number of sale rows between two dates inclusive.
+     * Number of sale transactions between from and to inclusive.
      */
     @Query("SELECT COUNT(s) FROM Sale s WHERE s.saleDate BETWEEN :from AND :to")
     Long countSalesBetween(@Param("from") LocalDate from, @Param("to") LocalDate to);
 
     /**
-     * Total COGS (cost × quantity) between two dates inclusive.
-     * Requires Sale → Product join; product.cost must be non-null.
+     * Cost of Goods Sold = SUM(product.cost × quantity) for all sales in range.
+     * Uses the cost stored on the linked Product entity.
+     * Returns 0 when no sales exist.
      */
-    @Query("SELECT SUM(s.product.cost * s.quantity) FROM Sale s " +
-           "WHERE s.saleDate BETWEEN :from AND :to AND s.product.cost IS NOT NULL")
+    @Query("SELECT COALESCE(SUM(s.product.cost * s.quantity), 0) FROM Sale s WHERE s.saleDate BETWEEN :from AND :to")
     Double sumCogsBetween(@Param("from") LocalDate from, @Param("to") LocalDate to);
 
     // ── Analytics: daily series ───────────────────────────────────────────────
 
     /**
-     * Returns [saleDate, SUM(total), SUM(quantity)] grouped by day.
-     * Used to build the daily revenue/qty time-series chart.
+     * Revenue and quantity grouped by sale date — used to build daily chart series.
+     * Returns List of Object[]{LocalDate saleDate, Double revenue, Long quantity}.
      */
-    @Query("SELECT s.saleDate, SUM(s.total), SUM(s.quantity) " +
-           "FROM Sale s " +
-           "WHERE s.saleDate BETWEEN :from AND :to " +
-           "GROUP BY s.saleDate " +
-           "ORDER BY s.saleDate")
+    @Query("SELECT s.saleDate, COALESCE(SUM(s.total), 0), COALESCE(SUM(s.quantity), 0) " +
+           "FROM Sale s WHERE s.saleDate BETWEEN :from AND :to " +
+           "GROUP BY s.saleDate ORDER BY s.saleDate")
     List<Object[]> sumBySaleDate(@Param("from") LocalDate from, @Param("to") LocalDate to);
 
     /**
-     * Returns [saleDate, SUM(cost * quantity)] grouped by day.
-     * Used to compute daily COGS for the profit/loss series.
+     * COGS grouped by sale date — used to compute daily gross profit.
+     * Returns List of Object[]{LocalDate saleDate, Double cogs}.
      */
-    @Query("SELECT s.saleDate, SUM(s.product.cost * s.quantity) " +
-           "FROM Sale s " +
-           "WHERE s.saleDate BETWEEN :from AND :to AND s.product.cost IS NOT NULL " +
-           "GROUP BY s.saleDate " +
-           "ORDER BY s.saleDate")
+    @Query("SELECT s.saleDate, COALESCE(SUM(s.product.cost * s.quantity), 0) " +
+           "FROM Sale s WHERE s.saleDate BETWEEN :from AND :to " +
+           "GROUP BY s.saleDate ORDER BY s.saleDate")
     List<Object[]> sumCogsBySaleDate(@Param("from") LocalDate from, @Param("to") LocalDate to);
 
-    // ── Analytics: monthly series ─────────────────────────────────────────────
+    // ── Analytics: monthly series — EXTRACT is PostgreSQL / Neon safe ─────────
 
     /**
-     * Returns [year, month, SUM(total), SUM(quantity)] grouped by year+month.
-     * Used to build the monthly revenue/qty time-series chart.
+     * Revenue and quantity grouped by year and month.
+     * Uses EXTRACT(YEAR/MONTH FROM ...) — works on PostgreSQL and Neon.
+     * Returns List of Object[]{Double year, Double month, Double revenue, Long quantity}.
      */
-    @Query("SELECT YEAR(s.saleDate), MONTH(s.saleDate), SUM(s.total), SUM(s.quantity) " +
-           "FROM Sale s " +
-           "WHERE s.saleDate BETWEEN :from AND :to " +
-           "GROUP BY YEAR(s.saleDate), MONTH(s.saleDate) " +
-           "ORDER BY YEAR(s.saleDate), MONTH(s.saleDate)")
+    @Query("SELECT EXTRACT(YEAR FROM s.saleDate), EXTRACT(MONTH FROM s.saleDate), " +
+           "COALESCE(SUM(s.total), 0), COALESCE(SUM(s.quantity), 0) " +
+           "FROM Sale s WHERE s.saleDate BETWEEN :from AND :to " +
+           "GROUP BY EXTRACT(YEAR FROM s.saleDate), EXTRACT(MONTH FROM s.saleDate) " +
+           "ORDER BY EXTRACT(YEAR FROM s.saleDate), EXTRACT(MONTH FROM s.saleDate)")
     List<Object[]> sumByYearMonth(@Param("from") LocalDate from, @Param("to") LocalDate to);
 
     /**
-     * Returns [year, month, SUM(cost * quantity)] grouped by year+month.
-     * Used to compute monthly COGS for the profit/loss series.
+     * COGS grouped by year and month — used to compute monthly gross profit.
+     * Returns List of Object[]{Double year, Double month, Double cogs}.
      */
-    @Query("SELECT YEAR(s.saleDate), MONTH(s.saleDate), SUM(s.product.cost * s.quantity) " +
-           "FROM Sale s " +
-           "WHERE s.saleDate BETWEEN :from AND :to AND s.product.cost IS NOT NULL " +
-           "GROUP BY YEAR(s.saleDate), MONTH(s.saleDate) " +
-           "ORDER BY YEAR(s.saleDate), MONTH(s.saleDate)")
+    @Query("SELECT EXTRACT(YEAR FROM s.saleDate), EXTRACT(MONTH FROM s.saleDate), " +
+           "COALESCE(SUM(s.product.cost * s.quantity), 0) " +
+           "FROM Sale s WHERE s.saleDate BETWEEN :from AND :to " +
+           "GROUP BY EXTRACT(YEAR FROM s.saleDate), EXTRACT(MONTH FROM s.saleDate) " +
+           "ORDER BY EXTRACT(YEAR FROM s.saleDate), EXTRACT(MONTH FROM s.saleDate)")
     List<Object[]> sumCogsByYearMonth(@Param("from") LocalDate from, @Param("to") LocalDate to);
-
-    // ── Analytics: hourly series ──────────────────────────────────────────────
-
-    /**
-     * Returns all Sale entities for a single day (used to compute the hourly series).
-     * Spring Data derives this from the method name automatically — no @Query needed.
-     */
-    List<Sale> findBySaleDateBetween(LocalDate from, LocalDate to);
 
     // ── Analytics: product revenue ranking ───────────────────────────────────
 
     /**
-     * Returns [product.name, SUM(total), SUM(quantity)] per product in the
-     * date range, ordered by revenue descending.
-     * Used to build the Top N / Bottom N product ranking on the dashboard.
+     * Product name, total revenue, and total quantity sold — ordered by revenue DESC.
+     * Used to build top-products and bottom-products charts.
+     * Returns List of Object[]{String productName, Double revenue, Long quantity}.
      */
-    @Query("SELECT s.product.name, SUM(s.total), SUM(s.quantity) " +
-           "FROM Sale s " +
-           "WHERE s.saleDate BETWEEN :from AND :to " +
-           "GROUP BY s.product.id, s.product.name " +
-           "ORDER BY SUM(s.total) DESC")
-    List<Object[]> findProductRevenueBetween(
-            @Param("from") LocalDate from,
-            @Param("to")   LocalDate to);
+    @Query("SELECT s.product.name, COALESCE(SUM(s.total), 0), COALESCE(SUM(s.quantity), 0) " +
+           "FROM Sale s WHERE s.saleDate BETWEEN :from AND :to " +
+           "GROUP BY s.product.name ORDER BY SUM(s.total) DESC")
+    List<Object[]> findProductRevenueBetween(@Param("from") LocalDate from, @Param("to") LocalDate to);
 }

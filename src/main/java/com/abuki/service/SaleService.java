@@ -2,123 +2,147 @@ package com.abuki.service;
 
 import com.abuki.model.Product;
 import com.abuki.model.Sale;
-import com.abuki.audit.AuditService;
-import com.abuki.repository.ProductRepository;
 import com.abuki.repository.SaleRepository;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.cache.annotation.Caching;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
+/**
+ * Sale service — read operations cached, write operations evict
+ * both "products" and "analytics" caches.
+ *
+ * Why "analytics" is also evicted on sale writes:
+ *  Analytics KPIs (revenue, COGS, counts) are derived from sales data.
+ *  When a sale is recorded or deleted, the cached analytics result is stale
+ *  and must be cleared so the next analytics request recomputes from Neon.
+ */
 @Service
+@Transactional
 public class SaleService {
 
-    @Autowired private SaleRepository    saleRepo;
-    @Autowired private ProductRepository productRepo;
-    @Autowired private ProductService    productService;
-    @Autowired private AuditService      auditService;
+    @Autowired
+    private SaleRepository saleRepository;
 
-    // ── READ ALL ─────────────────────────────────────────
+    @Autowired
+    private ProductService productService;
+
+    // ── Read: cached ─────────────────────────────────────
+
+    /**
+     * Returns all sales ordered newest first.
+     * Cached under key "allSales" — evicted on any write.
+     */
+    @Cacheable(value = "products", key = "'allSales'")
     @Transactional(readOnly = true)
     public List<Sale> getAll() {
-        return saleRepo.findAllOrderedByDate();
+        return saleRepository.findAllOrderedByDate();
     }
 
-    // ── READ ONE ─────────────────────────────────────────
+    /**
+     * Returns a single sale by ID.
+     * Cached per sale ID.
+     */
+    @Cacheable(value = "products", key = "'sale:' + #id")
     @Transactional(readOnly = true)
     public Sale getById(Long id) {
-        return saleRepo.findById(id)
-            .orElseThrow(() -> new RuntimeException("Sale not found: " + id));
+        return saleRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Sale not found with id: " + id));
     }
 
-    // ── CREATE (record sale) ─────────────────────────────
-    @Transactional
-    public Sale recordSale(Sale req) {
-        Product product = productRepo.findByIdForUpdate(req.getProduct().getId())
-            .orElseThrow(() -> new RuntimeException(
-                "Product not found: " + req.getProduct().getId()));
+    // ── Write: cache-evicting ─────────────────────────────
 
-        // Validate stock
-        if (req.getQuantity() == null || req.getQuantity() <= 0) {
-            throw new RuntimeException("Quantity must be greater than zero.");
-        }
-        if (product.getStock() < req.getQuantity()) {
+    /**
+     * Records a new sale:
+     *  1. Validates product stock is sufficient
+     *  2. Calculates total = price × quantity
+     *  3. Saves the sale row
+     *  4. Deducts stock from the product and logs stock history
+     *
+     * Evicts "products" cache (stock changed) and "analytics" cache (revenue changed).
+     */
+    @Caching(evict = {
+        @CacheEvict(value = "products",  allEntries = true),
+        @CacheEvict(value = "analytics", allEntries = true)
+    })
+    public Sale recordSale(Sale sale) {
+        Product product = productService.getById(sale.getProduct().getId());
+
+        // Validate sufficient stock before recording the sale
+        if (product.getStock() < sale.getQuantity()) {
             throw new RuntimeException(
                 "Insufficient stock for '" + product.getName() +
                 "'. Available: " + product.getStock() +
-                ", Requested: " + req.getQuantity());
+                ", Requested: " + sale.getQuantity());
         }
 
-        // Use product price if not provided
-        double unitPrice = (req.getPrice() != null && req.getPrice() > 0)
-            ? req.getPrice()
-            : product.getPrice();
-
-        req.setPrice(unitPrice);
-        req.setTotal(unitPrice * req.getQuantity());
-        req.setProduct(product);
-
-        if (req.getRecordedBy() == null || req.getRecordedBy().isBlank()) {
-            req.setRecordedBy("Admin");
+        // Use product price if sale price not supplied by frontend
+        if (sale.getPrice() == null) {
+            sale.setPrice(product.getPrice());
         }
 
-        // Save sale — flush immediately so it appears in DB
-        Sale saved = saleRepo.saveAndFlush(req);
+        // Calculate and set total revenue for this sale
+        sale.setTotal(sale.getPrice() * sale.getQuantity());
+        sale.setProduct(product);
 
-        // Deduct stock
-        int before = product.getStock();
-        int after  = before - req.getQuantity();
-        product.setStock(after);
-        product.computeStatus();
-        productRepo.saveAndFlush(product);
+        // Persist the sale row
+        Sale saved = saleRepository.save(sale);
 
-        // Log stock change
-        productService.saveHistory(
-            product, -req.getQuantity(), before, after,
+        // Deduct stock and record the change in stock history
+        int prevStock = product.getStock();
+        int newStock  = prevStock - sale.getQuantity();
+        product.setStock(newStock);
+
+        productService.recordHistory(
+            product,
+            -sale.getQuantity(),
+            prevStock, newStock,
             "SALE",
-            "Sale to " + (req.getCustomerName() != null ? req.getCustomerName() : "customer"),
-            req.getRecordedBy(),
+            "Sale to " + (sale.getCustomerName() != null ? sale.getCustomerName() : "customer"),
+            sale.getRecordedBy() != null ? sale.getRecordedBy() : "Admin",
             "SALE-" + saved.getId()
         );
 
-        auditService.record("SALE_RECORDED", "Sale", String.valueOf(saved.getId()),
-            "product=" + product.getId() + " qty=" + req.getQuantity() + " total=" + saved.getTotal());
+        // Save updated stock — triggers @PreUpdate on Product which recalculates status
+        productService.update(product.getId(), product);
 
         return saved;
     }
 
-    // ── DELETE (restores stock) ───────────────────────────
-    @Transactional
+    /**
+     * Deletes a sale and restores stock to the product.
+     *
+     * Evicts "products" cache (stock restored) and "analytics" cache (revenue changed).
+     */
+    @Caching(evict = {
+        @CacheEvict(value = "products",  allEntries = true),
+        @CacheEvict(value = "analytics", allEntries = true)
+    })
     public void deleteSale(Long id) {
-        // Load sale fresh from DB
-        Sale sale = saleRepo.findById(id)
-            .orElseThrow(() -> new RuntimeException("Sale not found: " + id));
+        Sale sale    = saleRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Sale not found with id: " + id));
+        Product product = sale.getProduct();
 
-        Product product = productRepo.findByIdForUpdate(sale.getProduct().getId())
-            .orElseThrow(() -> new RuntimeException("Product not found: " + sale.getProduct().getId()));
+        // Restore stock to the product
+        int prevStock = product.getStock();
+        int newStock  = prevStock + sale.getQuantity();
+        product.setStock(newStock);
 
-        // Restore stock
-        int before = product.getStock();
-        int after  = before + sale.getQuantity();
-        product.setStock(after);
-        product.computeStatus();
-        productRepo.saveAndFlush(product);
-
-        // Log stock restoration
-        productService.saveHistory(
-            product, sale.getQuantity(), before, after,
+        productService.recordHistory(
+            product,
+            sale.getQuantity(),
+            prevStock, newStock,
             "ADJUSTMENT",
             "Stock restored — sale #" + id + " deleted",
             "System",
             "SALE-DEL-" + id
         );
 
-        // Hard delete sale — flush immediately
-        saleRepo.deleteById(id);
-        saleRepo.flush();
-
-        auditService.record("SALE_DELETED", "Sale", String.valueOf(id),
-            "product=" + product.getId() + " restoredQty=" + sale.getQuantity());
+        productService.update(product.getId(), product);
+        saleRepository.delete(sale);
     }
 }
