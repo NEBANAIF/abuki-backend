@@ -25,7 +25,7 @@ public class DataSeeder {
                     reference varchar(255),
                     time time,
                     type varchar(30) NOT NULL,
-                    "user" varchar(100) NOT NULL,
+                    recorded_by varchar(100) NOT NULL,
                     product_id bigint NOT NULL,
                     CONSTRAINT fk_sh_product FOREIGN KEY (product_id) REFERENCES products(id)
                 )

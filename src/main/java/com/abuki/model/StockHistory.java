@@ -34,7 +34,7 @@ public class StockHistory {
     @Column(length = 500)
     private String reason;
 
-    @Column(nullable = false, length = 100)
+    @Column(name = "recorded_by", namenullable = false, length = 100)
     private String user;
 
     @Column(name = "sale_date")
