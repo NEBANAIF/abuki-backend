@@ -27,7 +27,8 @@ import java.util.List;
  *
  *  ROLES:
  *    ADMIN  → full access to every endpoint
- *    WORKER → read-only Products, read today's Sales only, POST sales (record)
+ *    WORKER → full Products access (read, create, update, delete, stock-adjust),
+ *             read today's Sales only, POST sales (record)
  *             NO access to: users, analytics, finance, stock-history, delete sales
  *
  *  JWT is stateless (no session). Role is embedded in token claim "role".
@@ -96,13 +97,10 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.DELETE, "/api/sales/**").hasRole("ADMIN")
                 .requestMatchers("/api/sales/**").authenticated()  // GET + POST allowed for both roles
 
-                // ── PRODUCTS: Workers can read only (GET)
-                //              Workers cannot create, update, or delete products
-                .requestMatchers(HttpMethod.GET,    "/api/products/**").authenticated() // both roles
-                .requestMatchers(HttpMethod.POST,   "/api/products/**").hasRole("ADMIN")
-                .requestMatchers(HttpMethod.PUT,    "/api/products/**").hasRole("ADMIN")
-                .requestMatchers(HttpMethod.DELETE, "/api/products/**").hasRole("ADMIN")
-                .requestMatchers(HttpMethod.PATCH,  "/api/products/**").hasRole("ADMIN")
+                // ── PRODUCTS: Both ADMIN and WORKER have full access
+                //              (read, create, update, delete, stock-adjust)
+                // Both ADMIN and WORKER have full products access
+                .requestMatchers("/api/products/**").authenticated()
 
                 // ── Everything else requires authentication ─────────────────
                 .anyRequest().authenticated()
