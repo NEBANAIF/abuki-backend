@@ -206,6 +206,10 @@ public class ProductService {
         history.setReason(reason);
         history.setUser(user);
         history.setReference(reference);
+        // Explicitly set date and time so they are never null,
+        // even if @PrePersist is bypassed (e.g. old records, bulk inserts)
+        history.setDate(java.time.LocalDate.now());
+        history.setTime(java.time.LocalTime.now());
         stockHistoryRepository.save(history);
     }
 }

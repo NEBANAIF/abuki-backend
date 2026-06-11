@@ -4,7 +4,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
@@ -19,17 +21,31 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 import java.util.List;
 
 /**
- * Security configuration — JWT stateless, CORS, CSRF disabled.
- * CorsConfig.java is intentionally DELETED; this is the single source of truth.
+ * ─────────────────────────────────────────────────────────────────────────
+ *  Security Configuration — Role-Based Access Control
+ *  ─────────────────────────────────────────────────────────────────────────
+ *
+ *  ROLES:
+ *    ADMIN  → full access to every endpoint
+ *    WORKER → read-only Products, read today's Sales only, POST sales (record)
+ *             NO access to: users, analytics, finance, stock-history, delete sales
+ *
+ *  JWT is stateless (no session). Role is embedded in token claim "role".
+ *  JwtAuthFilter extracts it and sets ROLE_ADMIN or ROLE_WORKER authority.
+ *
+ *  @EnableMethodSecurity is also enabled so controllers can use @PreAuthorize
+ *  for fine-grained per-method control.
+ * ─────────────────────────────────────────────────────────────────────────
  */
 @Configuration
 @EnableWebSecurity
+@EnableMethodSecurity(prePostEnabled = true) // enables @PreAuthorize on controller methods
 public class SecurityConfig {
 
     @Autowired
     private JwtAuthFilter jwtAuthFilter;
 
-    /** Allowed frontend origins — extend in production via environment if needed */
+    /** Allowed frontend origins — extend via env for production */
     @Value("${app.cors.allowed-origins:http://localhost,http://localhost:80,http://localhost:5173,http://localhost:3000}")
     private String allowedOriginsRaw;
 
@@ -39,14 +55,56 @@ public class SecurityConfig {
             .cors(cors -> cors.configurationSource(corsSource()))
             .csrf(csrf -> csrf.disable())
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-            .exceptionHandling(ex -> ex.authenticationEntryPoint((request, response, authException) -> {
-                response.setStatus(401);
-                response.setContentType(MediaType.APPLICATION_JSON_VALUE);
-                response.getWriter().write("{\"error\":\"Authentication required\"}");
-            }))
+
+            // ── 401 handler: returns JSON instead of HTML ──────────────────
+            .exceptionHandling(ex -> ex
+                .authenticationEntryPoint((req, res, authEx) -> {
+                    res.setStatus(401);
+                    res.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                    res.getWriter().write("{\"error\":\"Authentication required\"}");
+                })
+                // ── 403 handler: returns JSON for role-denied requests ─────
+                .accessDeniedHandler((req, res, deniedException) -> {
+                    res.setStatus(403);
+                    res.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                    res.getWriter().write("{\"error\":\"Access denied: insufficient permissions\"}");
+                })
+            )
+
             .authorizeHttpRequests(auth -> auth
+
+                // ── Public endpoints (no token required) ──────────────────
                 .requestMatchers("/api/auth/**").permitAll()
                 .requestMatchers("/actuator/health").permitAll()
+
+                // ── ADMIN-ONLY: User management ────────────────────────────
+                // Workers cannot view, create, update or delete users
+                .requestMatchers("/api/users/**").hasRole("ADMIN")
+
+                // ── ADMIN-ONLY: Analytics & Finance (Expenses) ─────────────
+                // Workers do not have access to analytics dashboard or expenses
+                .requestMatchers("/api/analytics/**").hasRole("ADMIN")
+                .requestMatchers("/api/expenses/**").hasRole("ADMIN")
+
+                // ── ADMIN-ONLY: Stock history ───────────────────────────────
+                // Workers cannot view stock history
+                .requestMatchers("/api/stock-history/**").hasRole("ADMIN")
+
+                // ── SALES: Workers can GET (today filter done in frontend)
+                //           Workers can POST (record a sale)
+                //           Workers CANNOT DELETE — ADMIN only
+                .requestMatchers(HttpMethod.DELETE, "/api/sales/**").hasRole("ADMIN")
+                .requestMatchers("/api/sales/**").authenticated()  // GET + POST allowed for both roles
+
+                // ── PRODUCTS: Workers can read only (GET)
+                //              Workers cannot create, update, or delete products
+                .requestMatchers(HttpMethod.GET,    "/api/products/**").authenticated() // both roles
+                .requestMatchers(HttpMethod.POST,   "/api/products/**").hasRole("ADMIN")
+                .requestMatchers(HttpMethod.PUT,    "/api/products/**").hasRole("ADMIN")
+                .requestMatchers(HttpMethod.DELETE, "/api/products/**").hasRole("ADMIN")
+                .requestMatchers(HttpMethod.PATCH,  "/api/products/**").hasRole("ADMIN")
+
+                // ── Everything else requires authentication ─────────────────
                 .anyRequest().authenticated()
             )
             .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
@@ -70,7 +128,7 @@ public class SecurityConfig {
             .filter(s -> !s.isEmpty())
             .toList();
 
-        config.setAllowedOriginPatterns(List.of("*")); // Nginx proxies all — frontend origin is localhost
+        config.setAllowedOriginPatterns(List.of("*")); // Nginx proxies; frontend is localhost
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
         config.setAllowedHeaders(List.of("*"));
         config.setExposedHeaders(List.of("Authorization"));
