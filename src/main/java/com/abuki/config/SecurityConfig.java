@@ -99,7 +99,8 @@ public class SecurityConfig {
 
                 // ── PRODUCTS: Both ADMIN and WORKER have full access
                 //              (read, create, update, delete, stock-adjust)
-                // Both ADMIN and WORKER have full products access
+                // Products: both roles can read/create/edit/stock-adjust; only ADMIN can delete
+                .requestMatchers(HttpMethod.DELETE, "/api/products/**").hasRole("ADMIN")
                 .requestMatchers("/api/products/**").authenticated()
 
                 // ── Everything else requires authentication ─────────────────
