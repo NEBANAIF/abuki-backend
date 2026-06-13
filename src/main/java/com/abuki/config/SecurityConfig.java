@@ -1,7 +1,6 @@
 package com.abuki.config;
 
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
@@ -45,10 +44,6 @@ public class SecurityConfig {
 
     @Autowired
     private JwtAuthFilter jwtAuthFilter;
-
-    /** Allowed frontend origins — extend via env for production */
-    @Value("${app.cors.allowed-origins:http://localhost,http://localhost:80,http://localhost:5173,http://localhost:3000}")
-    private String allowedOriginsRaw;
 
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
@@ -120,14 +115,9 @@ public class SecurityConfig {
     public CorsConfigurationSource corsSource() {
         CorsConfiguration config = new CorsConfiguration();
 
-        // Parse comma-separated allowed origins from env/properties
-        List<String> origins = List.of(allowedOriginsRaw.split(","))
-            .stream()
-            .map(String::trim)
-            .filter(s -> !s.isEmpty())
-            .toList();
-
-        config.setAllowedOriginPatterns(List.of("*")); // Nginx proxies; frontend is localhost
+        // Allow all origins (requests are proxied through Nginx)
+        // In a multi-domain setup, parse from app.cors.allowed-origins env variable
+        config.setAllowedOriginPatterns(List.of("*"));
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
         config.setAllowedHeaders(List.of("*"));
         config.setExposedHeaders(List.of("Authorization"));
