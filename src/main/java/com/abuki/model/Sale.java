@@ -43,6 +43,19 @@ public class Sale {
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;
 
+    // ── Payment tracking fields ───────────────────────────
+    // PAID_FULL = fully paid, PARTIAL_LOAN = customer owes some amount
+    @Column(name = "payment_status", nullable = false)
+    private String paymentStatus = "PAID_FULL";
+
+    // How much the customer has paid so far
+    @Column(name = "paid_amount", nullable = false)
+    private Double paidAmount = 0.0;
+
+    // Remaining unpaid balance (total - paidAmount)
+    @Column(name = "remaining_loan", nullable = false)
+    private Double remainingLoan = 0.0;
+
     @PrePersist
     protected void onCreate() {
         if (saleDate == null) saleDate = LocalDate.now();
@@ -51,6 +64,10 @@ public class Sale {
             total = price * quantity;
         }
         createdAt = LocalDateTime.now();
+        // Default payment status if not set
+        if (paymentStatus == null) paymentStatus = "PAID_FULL";
+        if (paidAmount == null) paidAmount = 0.0;
+        if (remainingLoan == null) remainingLoan = 0.0;
     }
 
     // ── Getters & Setters ────────────────────────────────
@@ -83,4 +100,13 @@ public class Sale {
 
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
+
+    public String getPaymentStatus() { return paymentStatus; }
+    public void setPaymentStatus(String paymentStatus) { this.paymentStatus = paymentStatus; }
+
+    public Double getPaidAmount() { return paidAmount; }
+    public void setPaidAmount(Double paidAmount) { this.paidAmount = paidAmount; }
+
+    public Double getRemainingLoan() { return remainingLoan; }
+    public void setRemainingLoan(Double remainingLoan) { this.remainingLoan = remainingLoan; }
 }
