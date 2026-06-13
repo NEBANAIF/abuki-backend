@@ -79,6 +79,22 @@ public class SaleController {
         }
     }
 
+    // ── PUT /api/sales/{id}/payment — ADMIN only (update loan payment) ────
+    @PutMapping("/{id}/payment")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<?> updatePayment(
+            @PathVariable Long id,
+            @RequestBody Map<String, Object> body) {
+        try {
+            Double newPaidAmount = body.get("paidAmount") instanceof Number n
+                    ? n.doubleValue()
+                    : Double.parseDouble(body.get("paidAmount").toString());
+            return ResponseEntity.ok(saleService.updateSalePayment(id, newPaidAmount));
+        } catch (RuntimeException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
     // ── DELETE /api/sales/{id} — ADMIN only ───────────────────────────────
     // SecurityConfig already blocks DELETE for WORKER with 403
     // This @PreAuthorize is an extra layer of protection

@@ -15,11 +15,6 @@ import java.util.List;
 /**
  * Sale service — read operations cached, write operations evict
  * both "products" and "analytics" caches.
- *
- * Why "analytics" is also evicted on sale writes:
- *  Analytics KPIs (revenue, COGS, counts) are derived from sales data.
- *  When a sale is recorded or deleted, the cached analytics result is stale
- *  and must be cleared so the next analytics request recomputes from Neon.
  */
 @Service
 @Transactional
@@ -31,22 +26,14 @@ public class SaleService {
     @Autowired
     private ProductService productService;
 
-    // ── Read: cached ─────────────────────────────────────
+    // ── Read: cached ──────────────────────────────────────────────────────
 
-    /**
-     * Returns all sales ordered newest first.
-     * Cached under key "allSales" — evicted on any write.
-     */
     @Cacheable(value = "products", key = "'allSales'")
     @Transactional(readOnly = true)
     public List<Sale> getAll() {
         return saleRepository.findAllOrderedByDate();
     }
 
-    /**
-     * Returns a single sale by ID.
-     * Cached per sale ID.
-     */
     @Cacheable(value = "products", key = "'sale:' + #id")
     @Transactional(readOnly = true)
     public Sale getById(Long id) {
@@ -54,23 +41,19 @@ public class SaleService {
                 .orElseThrow(() -> new RuntimeException("Sale not found with id: " + id));
     }
 
-    // ── Write: cache-evicting ─────────────────────────────
+    // ── Write: cache-evicting ─────────────────────────────────────────────
 
-    /**
-     * Records a new sale:
-     *  1. Validates product stock is sufficient
-     *  2. Calculates total = price × quantity
-     *  3. Saves the sale row
-     *  4. Deducts stock from the product and logs stock history
-     *
-     * Evicts "products" cache (stock changed) and "analytics" cache (revenue changed).
-     */
     @Caching(evict = {
         @CacheEvict(value = "products",  allEntries = true),
         @CacheEvict(value = "analytics", allEntries = true)
     })
     public Sale recordSale(Sale sale) {
         Product product = productService.getById(sale.getProduct().getId());
+
+        // ── Required: customer name ───────────────────────────────────────
+        if (sale.getCustomerName() == null || sale.getCustomerName().isBlank()) {
+            throw new RuntimeException("Customer name is required.");
+        }
 
         // Validate sufficient stock before recording the sale
         if (product.getStock() < sale.getQuantity()) {
@@ -86,8 +69,27 @@ public class SaleService {
         }
 
         // Calculate and set total revenue for this sale
-        sale.setTotal(sale.getPrice() * sale.getQuantity());
+        double total = sale.getPrice() * sale.getQuantity();
+        sale.setTotal(total);
         sale.setProduct(product);
+
+        // ── Payment validation ────────────────────────────────────────────
+        String status = sale.getPaymentStatus();
+        if (status == null || status.isBlank()) status = "PAID_FULL";
+        sale.setPaymentStatus(status);
+
+        if ("PAID_FULL".equals(status)) {
+            sale.setPaidAmount(total);
+            sale.setRemainingLoan(0.0);
+        } else if ("PARTIAL_LOAN".equals(status)) {
+            double paid = sale.getPaidAmount() != null ? sale.getPaidAmount() : 0.0;
+            if (paid < 0)     throw new RuntimeException("Paid amount cannot be negative.");
+            if (paid > total) throw new RuntimeException("Paid amount (" + paid + ") cannot exceed the total (" + total + ").");
+            sale.setPaidAmount(paid);
+            sale.setRemainingLoan(total - paid);
+        } else {
+            throw new RuntimeException("Invalid payment status: " + status);
+        }
 
         // Persist the sale row
         Sale saved = saleRepository.save(sale);
@@ -102,22 +104,44 @@ public class SaleService {
             -sale.getQuantity(),
             prevStock, newStock,
             "SALE",
-            "Sale to " + (sale.getCustomerName() != null ? sale.getCustomerName() : "customer"),
+            "Sale to " + sale.getCustomerName(),
             sale.getRecordedBy() != null ? sale.getRecordedBy() : "Admin",
             "SALE-" + saved.getId()
         );
 
-        // Save updated stock — triggers @PreUpdate on Product which recalculates status
         productService.update(product.getId(), product);
 
         return saved;
     }
 
     /**
-     * Deletes a sale and restores stock to the product.
-     *
-     * Evicts "products" cache (stock restored) and "analytics" cache (revenue changed).
+     * Partial update — only touches payment fields.
+     * Called from the Loan page to record a repayment.
+     * If paidAmount reaches total, paymentStatus flips to PAID_FULL.
      */
+    @Caching(evict = {
+        @CacheEvict(value = "products",  allEntries = true),
+        @CacheEvict(value = "analytics", allEntries = true)
+    })
+    public Sale updateSalePayment(Long id, Double newPaidAmount) {
+        Sale sale = saleRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Sale not found with id: " + id));
+
+        double total = sale.getTotal() != null ? sale.getTotal() : 0.0;
+
+        if (newPaidAmount < 0)
+            throw new RuntimeException("Paid amount cannot be negative.");
+        if (newPaidAmount > total)
+            throw new RuntimeException("Paid amount (" + newPaidAmount + ") cannot exceed the total (" + total + ").");
+
+        double remaining = total - newPaidAmount;
+        sale.setPaidAmount(newPaidAmount);
+        sale.setRemainingLoan(remaining);
+        sale.setPaymentStatus(remaining == 0.0 ? "PAID_FULL" : "PARTIAL_LOAN");
+
+        return saleRepository.save(sale);
+    }
+
     @Caching(evict = {
         @CacheEvict(value = "products",  allEntries = true),
         @CacheEvict(value = "analytics", allEntries = true)
@@ -127,7 +151,6 @@ public class SaleService {
                 .orElseThrow(() -> new RuntimeException("Sale not found with id: " + id));
         Product product = sale.getProduct();
 
-        // Restore stock to the product
         int prevStock = product.getStock();
         int newStock  = prevStock + sale.getQuantity();
         product.setStock(newStock);
