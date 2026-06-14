@@ -36,8 +36,9 @@ public class JwtAuthFilter extends OncePerRequestFilter {
             return;
         }
 
-        // Public endpoints — skip JWT check entirely
-        if (uri.startsWith("/api/auth/") || uri.equals("/actuator/health")) {
+        // ✅ Public endpoints — skip JWT check entirely
+        // Including /api/setup/** for initial admin creation
+        if (uri.startsWith("/api/auth/") || uri.startsWith("/api/setup/") || uri.equals("/actuator/health")) {
             chain.doFilter(request, response);
             return;
         }
