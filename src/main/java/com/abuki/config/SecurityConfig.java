@@ -1,131 +1,67 @@
 package com.abuki.config;
 
+import com.abuki.security.JwtAuthenticationFilter;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.http.HttpMethod;
-import org.springframework.http.MediaType;
-import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
+import org.springframework.security.config.annotation.method.configuration.EnableGlobalMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
-import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
-import org.springframework.web.cors.CorsConfiguration;
-import org.springframework.web.cors.CorsConfigurationSource;
-import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
-import java.util.List;
-
-/**
- * ─────────────────────────────────────────────────────────────────────────
- *  Security Configuration — Role-Based Access Control
- *  ─────────────────────────────────────────────────────────────────────────
- *
- *  ROLES:
- *    ADMIN  → full access to every endpoint
- *    WORKER → full Products access (read, create, update, delete, stock-adjust),
- *             read today's Sales only, POST sales (record)
- *             NO access to: users, analytics, finance, stock-history, delete sales
- *
- *  JWT is stateless (no session). Role is embedded in token claim "role".
- *  JwtAuthFilter extracts it and sets ROLE_ADMIN or ROLE_WORKER authority.
- *
- *  @EnableMethodSecurity is also enabled so controllers can use @PreAuthorize
- *  for fine-grained per-method control.
- * ─────────────────────────────────────────────────────────────────────────
- */
 @Configuration
 @EnableWebSecurity
-@EnableMethodSecurity(prePostEnabled = true) // enables @PreAuthorize on controller methods
+@EnableGlobalMethodSecurity(prePostEnabled = true)
 public class SecurityConfig {
 
     @Autowired
-    private JwtAuthFilter jwtAuthFilter;
+    private UserDetailsService userDetailsService;
 
+    @Autowired
+    private PasswordEncoder passwordEncoder;
+
+    @Autowired
+    private JwtAuthenticationFilter jwtAuthenticationFilter;
+
+    // ── Authentication Manager ─────────────────────────────────────
+    @Bean
+    public AuthenticationManager authenticationManager(HttpSecurity http) throws Exception {
+        AuthenticationManagerBuilder authenticationManagerBuilder = 
+            http.getSharedObject(AuthenticationManagerBuilder.class);
+        authenticationManagerBuilder
+            .userDetailsService(userDetailsService)
+            .passwordEncoder(passwordEncoder);
+        return authenticationManagerBuilder.build();
+    }
+
+    // ── Security Filter Chain ──────────────────────────────────────
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
-            .cors(cors -> cors.configurationSource(corsSource()))
-            .csrf(csrf -> csrf.disable())
-            .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-
-            // ── 401 handler: returns JSON instead of HTML ──────────────────
-            .exceptionHandling(ex -> ex
-                .authenticationEntryPoint((req, res, authEx) -> {
-                    res.setStatus(401);
-                    res.setContentType(MediaType.APPLICATION_JSON_VALUE);
-                    res.getWriter().write("{\"error\":\"Authentication required\"}");
-                })
-                // ── 403 handler: returns JSON for role-denied requests ─────
-                .accessDeniedHandler((req, res, deniedException) -> {
-                    res.setStatus(403);
-                    res.setContentType(MediaType.APPLICATION_JSON_VALUE);
-                    res.getWriter().write("{\"error\":\"Access denied: insufficient permissions\"}");
-                })
-            )
-
-            .authorizeHttpRequests(auth -> auth
-
-                // ── Public endpoints (no token required) ──────────────────
-                .requestMatchers("/api/auth/**").permitAll()
-                .requestMatchers("/actuator/health").permitAll()
-
-                // ── ADMIN-ONLY: User management ────────────────────────────
-                // Workers cannot view, create, update or delete users
-                .requestMatchers("/api/users/**").hasRole("ADMIN")
-
-                // ── ADMIN-ONLY: Analytics & Finance (Expenses) ─────────────
-                // Workers do not have access to analytics dashboard or expenses
-                .requestMatchers("/api/analytics/**").hasRole("ADMIN")
-                .requestMatchers("/api/expenses/**").hasRole("ADMIN")
-
-                // ── ADMIN-ONLY: Stock history ───────────────────────────────
-                // Workers cannot view stock history
-                .requestMatchers("/api/stock-history/**").hasRole("ADMIN")
-
-                // ── SALES: Workers can GET (today filter done in frontend)
-                //           Workers can POST (record a sale)
-                //           Workers CANNOT DELETE — ADMIN only
-                .requestMatchers(HttpMethod.DELETE, "/api/sales/**").hasRole("ADMIN")
-                .requestMatchers("/api/sales/**").authenticated()  // GET + POST allowed for both roles
-
-                // ── PRODUCTS: Both ADMIN and WORKER have full access
-                //              (read, create, update, delete, stock-adjust)
-                // Products: both roles can read/create/edit/stock-adjust; only ADMIN can delete
-                .requestMatchers(HttpMethod.DELETE, "/api/products/**").hasRole("ADMIN")
-                .requestMatchers("/api/products/**").authenticated()
-
-                // ── Everything else requires authentication ─────────────────
+            .csrf().disable()
+            .sessionManagement().sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+            .and()
+            .authorizeRequests()
+                // ✅ SETUP ENDPOINTS - NO AUTHENTICATION REQUIRED (allow initial admin creation)
+                .antMatchers("/api/setup/**").permitAll()
+                
+                // ✅ AUTH ENDPOINTS - NO AUTHENTICATION REQUIRED (allow login)
+                .antMatchers("/api/auth/**").permitAll()
+                
+                // ✅ HEALTH CHECK - NO AUTHENTICATION REQUIRED
+                .antMatchers("/actuator/health").permitAll()
+                
+                // ✅ ALL OTHER ENDPOINTS - REQUIRE AUTHENTICATION (JWT required)
                 .anyRequest().authenticated()
-            )
-            .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+            .and()
+            .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
-    }
-
-    @Bean
-    public PasswordEncoder passwordEncoder() {
-        return new BCryptPasswordEncoder();
-    }
-
-    @Bean
-    public CorsConfigurationSource corsSource() {
-        CorsConfiguration config = new CorsConfiguration();
-
-        // Allow all origins (requests are proxied through Nginx)
-        // In a multi-domain setup, parse from app.cors.allowed-origins env variable
-        config.setAllowedOriginPatterns(List.of("*"));
-        config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
-        config.setAllowedHeaders(List.of("*"));
-        config.setExposedHeaders(List.of("Authorization"));
-        config.setAllowCredentials(false);
-        config.setMaxAge(3600L);
-
-        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
-        source.registerCorsConfiguration("/api/**", config);
-        return source;
     }
 }
